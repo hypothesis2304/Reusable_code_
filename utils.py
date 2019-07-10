@@ -32,7 +32,7 @@ def subsample(x, mask):
     return x
 
 
-def Augmenter(x):
+def augmenter(x):
     # Basic transformations, can change accordingly
     # Among the given augmentations it always applies any 2 randomly chosen augmentations.
     seq = iaa.Sequential([iaa.SomeOf((0, 2),
@@ -46,3 +46,14 @@ def Augmenter(x):
                                      ], random_order=True)
                           ])
     return seq.augment_images(x)
+
+
+class Entropy(nn.Module):
+    # Entropy loss, input the predictions.
+    def __init__(self):
+        super(Entropy, self).__init__()
+
+    def forward(self, x):
+        b = F.softmax(x, dim=1) * F.log_softmax(x, dim=1)
+        b = -1.0 * b.sum()
+        return b
