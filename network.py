@@ -25,7 +25,7 @@ def init_weights(m):
 
 
 class ResNetFc(nn.Module):
-  def __init__(self, resnet_name, use_bottleneck=True, bottleneck_dim=256, new_cls=False, ema=False, class_num=1000):
+  def __init__(self, resnet_name, use_bottleneck=True, bottleneck_dim=256, new_cls=False, class_num=1000):
     super(ResNetFc, self).__init__()
     model_resnet = resnet_dict[resnet_name](pretrained=True)
     self.conv1 = model_resnet.conv1
@@ -37,11 +37,8 @@ class ResNetFc(nn.Module):
     self.layer3 = model_resnet.layer3
     self.layer4 = model_resnet.layer4
     self.avgpool = model_resnet.avgpool
-    self.features1 = nn.Sequential(self.conv1, self.bn1, self.relu, self.maxpool, \
-                         self.layer1)
-    self.features2 = nn.Sequential(self.layer2)
-    self.features3 = nn.Sequential(self.layer3)
-    self.features4 = nn.Sequential(self.layer4)
+    self.feature_layers = nn.Sequential(self.conv1, self.bn1, self.relu, self.maxpool, \
+                         self.layer1, self.layer2, self.layer3, self.layer4, self.avgpool)
 
     self.use_bottleneck = use_bottleneck
     self.new_cls = new_cls
@@ -61,11 +58,7 @@ class ResNetFc(nn.Module):
         self.__in_features = model_resnet.fc.in_features
 
   def forward(self, x):
-    x = self.features1(x)
-    x = self.features2(x)
-    x = self.features3(x)
-    x = self.features4(x)
-    x = self.avgpool(x)
+    x = self.feature_layers(x)
     x = x.view(x.size(0), -1)
     if self.use_bottleneck and self.new_cls:
         x = self.bottleneck(x)
@@ -78,16 +71,33 @@ class ResNetFc(nn.Module):
   def get_parameters(self):
     if self.new_cls:
         if self.use_bottleneck:
-            parameter_list = [{"params": self.features1.parameters(), "lr_mult":1, 'decay_mult':2}, \
-                            {"params": self.features2.parameters(), "lr_mult":1, 'decay_mult':2}, \
-                            {"params": self.features3.parameters(), "lr_mult":1, 'decay_mult':2}, \
+            parameter_list = [{"params":self.feature_layers.parameters(), "lr_mult":1, 'decay_mult':2}, \
                             {"params":self.bottleneck.parameters(), "lr_mult":10, 'decay_mult':2}, \
                             {"params":self.fc.parameters(), "lr_mult":10, 'decay_mult':2}]
         else:
-            parameter_list = [{"params": self.features1.parameters(), "lr_mult":1, 'decay_mult':2}, \
-                            {"params": self.features2.parameters(), "lr_mult":1, 'decay_mult':2}, \
-                            {"params": self.features3.parameters(), "lr_mult":1, 'decay_mult':2}, \
+            parameter_list = [{"params":self.feature_layers.parameters(), "lr_mult":1, 'decay_mult':2}, \
                             {"params":self.fc.parameters(), "lr_mult":10, 'decay_mult':2}]
     else:
         parameter_list = [{"params":self.parameters(), "lr_mult":1, 'decay_mult':2}]
     return parameter_list
+
+
+class AdversarialNetwork(nn.Module):
+    def __init__(self, in_feature):
+        super(AdversarialNetwork, self).__init__()
+        self.main = nn.Sequential(
+            nn.Linear(in_feature, 1024),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.5),
+            nn.Linear(1024,1024),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.5),
+            nn.Linear(1024, 1),
+            nn.Sigmoid()
+        )
+        self.grl = GradientReverseModule(lambda step: aToBSheduler(step, 0.0, 1.0, gamma=10, max_iter=10000))
+
+    def forward(self, x):
+        x_ = self.grl(x)
+        y = self.main(x_)
+        return y
