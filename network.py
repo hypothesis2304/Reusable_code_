@@ -8,9 +8,6 @@ import imgaug.augmenters as iaa
 import math
 import pdb
 
-def calc_coeff(iter_num, high=1.0, low=0.0, alpha=10.0, max_iter=10000.0):
-    return np.float(2.0 * (high - low) / (1.0 + np.exp(-alpha*iter_num / max_iter)) - (high - low) + low)
-
 def init_weights(m):
     classname = m.__class__.__name__
     if classname.find('Conv2d') != -1 or classname.find('ConvTranspose2d') != -1:
@@ -23,6 +20,34 @@ def init_weights(m):
         nn.init.xavier_normal_(m.weight)
         nn.init.zeros_(m.bias)
 
+def aToBSheduler(step, A, B, gamma=10, max_iter=10000):
+    ans = A + (2.0 / (1 + np.exp(- gamma * step * 1.0 / max_iter)) - 1.0) * (B - A)
+    return float(ans)
+
+class GradientReverseLayer(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, coeff, input):
+        ctx.coeff = coeff
+        return input.view_as(input)
+
+    @staticmethod
+    def backward(ctx, grad_outputs):
+        coeff = ctx.coeff
+        return None, -coeff * grad_outputs
+
+class GradientReverseModule(nn.Module):
+    def __init__(self, scheduler):
+        super(GradientReverseModule, self).__init__()
+        self.scheduler = scheduler
+        self.register_buffer('global_step', torch.zeros(1))
+        self.coeff = 0.0
+        self.grl = GradientReverseLayer.apply
+
+    def forward(self, x):
+        self.coeff = self.scheduler(self.global_step.item())
+        if self.training:
+            self.global_step += 1.0
+        return self.grl(self.coeff, x)
 
 class ResNetFc(nn.Module):
   def __init__(self, resnet_name, use_bottleneck=True, bottleneck_dim=256, new_cls=False, class_num=1000):
