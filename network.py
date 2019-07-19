@@ -8,123 +8,125 @@ import imgaug.augmenters as iaa
 import math
 import pdb
 
-def aToBSheduler(step, A, B, gamma=10, max_iter=10000):
-    ans = A + (2.0 / (1 + np.exp(- gamma * step * 1.0 / max_iter)) - 1.0) * (B - A)
-    return float(ans)
+def grl_hook(coeff):
+    def fun1(grad):
+        return -coeff*grad.clone()
+    return fun1
 
-class GradientReverseLayer(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, coeff, input):
-        ctx.coeff = coeff
-        return input.view_as(input)
+def calc_coeff(iter_num, high=1.0, low=0.0, alpha=10.0, max_iter=10000.0):
+    return np.float(2.0 * (high - low) / (1.0 + np.exp(-alpha*iter_num / max_iter)) - (high - low) + low)
 
-    @staticmethod
-    def backward(ctx, grad_outputs):
-        coeff = ctx.coeff
-        return None, -coeff * grad_outputs
+def init_weights(m):
+    classname = m.__class__.__name__
+    if classname.find('Conv2d') != -1 or classname.find('ConvTranspose2d') != -1:
+        nn.init.kaiming_uniform_(m.weight)
+        nn.init.zeros_(m.bias)
+    elif classname.find('BatchNorm') != -1:
+        nn.init.normal_(m.weight, 1.0, 0.02)
+        nn.init.zeros_(m.bias)
+    elif classname.find('Linear') != -1:
+        nn.init.xavier_normal_(m.weight)
+        nn.init.zeros_(m.bias)
 
-class GradientReverseModule(nn.Module):
-    def __init__(self, scheduler):
-        super(GradientReverseModule, self).__init__()
-        self.scheduler = scheduler
-        self.register_buffer('global_step', torch.zeros(1))
-        self.coeff = 0.0
-        self.grl = GradientReverseLayer.apply
+resnet_dict = {"ResNet18":models.resnet18, "ResNet34":models.resnet34, "ResNet50":models.resnet50, "ResNet101":models.resnet101, "ResNet152":models.resnet152}
 
-    def forward(self, x):
-        self.coeff = self.scheduler(self.global_step.item())
-        if self.training:
-            self.global_step += 1.0
-        return self.grl(self.coeff, x)
+def grl_hook(coeff):
+    def fun1(grad):
+        return -coeff*grad.clone()
+    return fun1
 
-from torchvision import models
+class ResNetFc(nn.Module):
+  def __init__(self, resnet_name, use_bottleneck=True, bottleneck_dim=256, new_cls=False, class_num=1000):
+    super(ResNetFc, self).__init__()
+    model_resnet = resnet_dict[resnet_name](pretrained=True)
+    self.conv1 = model_resnet.conv1
+    self.bn1 = model_resnet.bn1
+    self.relu = model_resnet.relu
+    self.maxpool = model_resnet.maxpool
+    self.layer1 = model_resnet.layer1
+    self.layer2 = model_resnet.layer2
+    self.layer3 = model_resnet.layer3
+    self.layer4 = model_resnet.layer4
+    self.avgpool = model_resnet.avgpool
+    self.feature_layers = nn.Sequential(self.conv1, self.bn1, self.relu, self.maxpool, \
+                         self.layer1, self.layer2, self.layer3, self.layer4, self.avgpool)
 
-
-class BaseFeatureExtractor(nn.Module):
-    def forward(self, *input):
-        pass
-
-    def __init__(self):
-        super(BaseFeatureExtractor, self).__init__()
-
-    def output_num(self):
-        pass
-
-    def train(self, mode=True):
-        for module in self.children():
-            if isinstance(module, nn.BatchNorm2d):
-                module.train(False)
-            else:
-                module.train(mode)
-
-
-class ResNet50Fc(BaseFeatureExtractor):
-    def __init__(self,model_path=None, normalize=True):
-        super(ResNet50Fc, self).__init__()
-        if model_path:
-            if os.path.exists(model_path):
-                self.model_resnet = models.resnet50(pretrained=False)
-                self.model_resnet.load_state_dict(torch.load(model_path))
-            else:
-                raise Exception('invalid model path!')
+    self.use_bottleneck = use_bottleneck
+    self.new_cls = new_cls
+    if new_cls:
+        if self.use_bottleneck:
+            self.bottleneck = nn.Linear(model_resnet.fc.in_features, bottleneck_dim)
+            self.fc = nn.Linear(bottleneck_dim, class_num)
+            self.bottleneck.apply(init_weights)
+            self.fc.apply(init_weights)
+            self.__in_features = bottleneck_dim
         else:
-            self.model_resnet = models.resnet50(pretrained=True)
-
-        if model_path or normalize:
-            # pretrain model is used, use ImageNet normalization
-            self.normalize = True
-            self.register_buffer('mean', torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
-            self.register_buffer('std', torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
-        else:
-            self.normalize = False
-
-        model_resnet = self.model_resnet
-        self.conv1 = model_resnet.conv1
-        self.bn1 = model_resnet.bn1
-        self.relu = model_resnet.relu
-        self.maxpool = model_resnet.maxpool
-        self.layer1 = model_resnet.layer1
-        self.layer2 = model_resnet.layer2
-        self.layer3 = model_resnet.layer3
-        self.layer4 = model_resnet.layer4
-        self.avgpool = model_resnet.avgpool
+            self.fc = nn.Linear(model_resnet.fc.in_features, class_num)
+            self.fc.apply(init_weights)
+            self.__in_features = model_resnet.fc.in_features
+    else:
+        self.fc = model_resnet.fc
         self.__in_features = model_resnet.fc.in_features
 
-    def forward(self, x):
-        if self.normalize:
-            x = (x - self.mean) / self.std
-        x = self.conv1(x)
-        x = self.bn1(x)
-        x = self.relu(x)
-        x = self.maxpool(x)
-        x = self.layer1(x)
-        x = self.layer2(x)
-        x = self.layer3(x)
-        x = self.layer4(x)
-        x = self.avgpool(x)
-        x = x.view(x.size(0), -1)
-        return x
+  def forward(self, x):
+    x = self.feature_layers(x)
+    x = x.view(x.size(0), -1)
+    if self.use_bottleneck and self.new_cls:
+        x = self.bottleneck(x)
+    y = self.fc(x)
+    return x, y
 
-    def output_num(self):
-        return self.__in_features
+  def output_num(self):
+    return self.__in_features
 
+  def get_parameters(self):
+    if self.new_cls:
+        if self.use_bottleneck:
+            parameter_list = [{"params":self.feature_layers.parameters(), "lr_mult":1, 'decay_mult':2}, \
+                            {"params":self.bottleneck.parameters(), "lr_mult":10, 'decay_mult':2}, \
+                            {"params":self.fc.parameters(), "lr_mult":10, 'decay_mult':2}]
+        else:
+            parameter_list = [{"params":self.feature_layers.parameters(), "lr_mult":1, 'decay_mult':2}, \
+                            {"params":self.fc.parameters(), "lr_mult":10, 'decay_mult':2}]
+    else:
+        parameter_list = [{"params":self.parameters(), "lr_mult":1, 'decay_mult':2}]
+    return parameter_list
 
 class AdversarialNetwork(nn.Module):
-    def __init__(self, in_feature):
-        super(AdversarialNetwork, self).__init__()
-        self.main = nn.Sequential(
-            nn.Linear(in_feature, 1024),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.5),
-            nn.Linear(1024,1024),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.5),
-            nn.Linear(1024, 1),
-            nn.Sigmoid()
-        )
-        self.grl = GradientReverseModule(lambda step: aToBSheduler(step, 0.0, 1.0, gamma=10, max_iter=10000))
+  def __init__(self, in_feature, hidden_size):
+    super(AdversarialNetwork, self).__init__()
+    self.ad_layer1 = nn.Linear(in_feature, hidden_size)
+    self.ad_layer2 = nn.Linear(hidden_size, hidden_size)
+    self.ad_layer3 = nn.Linear(hidden_size, 1)
+    self.relu1 = nn.ReLU()
+    self.relu2 = nn.ReLU()
+    self.dropout1 = nn.Dropout(0.5)
+    self.dropout2 = nn.Dropout(0.5)
+    self.sigmoid = nn.Sigmoid()
+    self.apply(init_weights)
+    self.iter_num = 0
+    self.alpha = 10
+    self.low = 0.0
+    self.high = 1.0
+    self.max_iter = 10000.0
 
-    def forward(self, x):
-        x_ = self.grl(x)
-        y = self.main(x_)
-        return y
+  def forward(self, x):
+    if self.training:
+        self.iter_num += 1
+    coeff = calc_coeff(self.iter_num, self.high, self.low, self.alpha, self.max_iter)
+    x = x * 1.0
+    x.register_hook(grl_hook(coeff))
+    x = self.ad_layer1(x)
+    x = self.relu1(x)
+    x = self.dropout1(x)
+    x = self.ad_layer2(x)
+    x = self.relu2(x)
+    x = self.dropout2(x)
+    y = self.ad_layer3(x)
+    y = self.sigmoid(y)
+    return y
+
+  def output_num(self):
+    return 1
+  def get_parameters(self):
+    return [{"params":self.parameters(), "lr_mult":10, 'decay_mult':2}]
